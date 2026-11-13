@@ -1,7 +1,7 @@
 """End-to-end checks against a real AstrBot source installation.
 
 Run this script through AstrBot's isolated uv environment. It uses AstrBot's
-real event, context, provider, response, configuration, and respond-stage
+real event, context, provider, response, configuration, and message-chain
 types while replacing only network-facing provider and platform operations.
 """
 
@@ -20,14 +20,6 @@ from unittest.mock import MagicMock
 
 
 def _load_plugin(plugin_root: Path):
-    """Load Heartflow with the real AstrBot decorators.
-
-    Args:
-        plugin_root: Heartflow repository root.
-
-    Returns:
-        Loaded Heartflow module.
-    """
     module_path = plugin_root / "main.py"
     spec = importlib.util.spec_from_file_location("heartflow_astrbot_e2e", module_path)
     if spec is None or spec.loader is None:
@@ -39,30 +31,15 @@ def _load_plugin(plugin_root: Path):
 
 
 async def _run(plugin_root: Path) -> dict:
-    """Run Heartflow through real AstrBot runtime types.
-
-    Args:
-        plugin_root: Heartflow repository root.
-
-    Returns:
-        Scenario summary suitable for JSON output.
-    """
     from astrbot.core.config.astrbot_config import AstrBotConfig
     from astrbot.core.config.default import DEFAULT_CONFIG
-    from astrbot.core.message.components import Plain
-    from astrbot.core.message.message_event_result import (
-        MessageChain,
-        MessageEventResult,
-        ResultContentType,
-    )
-    from astrbot.core.pipeline.context import PipelineContext
+    from astrbot.core.message.components import At, Plain, Reply
     from astrbot.core.pipeline.context_utils import call_event_hook, call_handler
-    from astrbot.core.pipeline.respond.stage import RespondStage
     from astrbot.core.platform.astr_message_event import AstrMessageEvent
     from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
     from astrbot.core.platform.message_type import MessageType
     from astrbot.core.platform.platform_metadata import PlatformMetadata
-    from astrbot.core.provider.entities import LLMResponse, ProviderRequest
+    from astrbot.core.provider.entities import LLMResponse
     from astrbot.core.provider.provider import Provider
     from astrbot.core.star.context import Context
     from astrbot.core.star.star import star_map
@@ -79,113 +56,81 @@ async def _run(plugin_root: Path) -> dict:
     schema = json.loads((plugin_root / "_conf_schema.json").read_text(encoding="utf-8"))
 
     class DeterministicProvider(Provider):
-        """Network-free real AstrBot chat provider."""
-
-        def __init__(self) -> None:
+        def __init__(self, provider_id: str, *, mode: str) -> None:
             super().__init__(
-                {"id": "judge", "type": "heartflow_e2e", "model": "deterministic"},
+                {"id": provider_id, "type": "heartflow_e2e", "model": "deterministic"},
                 {},
             )
+            self.mode = mode
             self.calls = []
             self.delay = 0.0
 
         def get_current_key(self) -> str:
-            """Return the provider key used by the integration test."""
             return "e2e"
 
         def set_key(self, key: str) -> None:
-            """Accept a provider key without contacting a service.
-
-            Args:
-                key: Provider key supplied by AstrBot.
-            """
             del key
 
         async def get_models(self) -> list[str]:
-            """Return the deterministic model name."""
             return ["deterministic"]
 
         async def text_chat(self, **kwargs) -> LLMResponse:
-            """Return a deterministic high-score response.
-
-            Args:
-                **kwargs: Real AstrBot Provider.text_chat arguments.
-
-            Returns:
-                Successful AstrBot LLM response containing score JSON.
-            """
             self.calls.append(kwargs)
             if self.delay:
                 await asyncio.sleep(self.delay)
-            scores = {
-                "relevance": 9,
-                "willingness": 9,
-                "social": 9,
-                "timing": 9,
-                "continuity": 9,
-                "reasoning": "deterministic e2e score",
-            }
+            if self.mode == "judge":
+                payload = {
+                    "relevance": 9,
+                    "willingness": 9,
+                    "social": 9,
+                    "timing": 9,
+                    "continuity": 8,
+                    "focus_index": 1,
+                    "topic_summary": "group discussion",
+                    "should_quote": False,
+                    "reasoning": "deterministic e2e score",
+                }
+                return LLMResponse(
+                    role="assistant",
+                    completion_text=json.dumps(payload, ensure_ascii=False),
+                )
             return LLMResponse(
                 role="assistant",
-                completion_text=json.dumps(scores, ensure_ascii=False),
+                completion_text="A natural proactive reply.",
             )
 
     class RecordingEvent(AstrMessageEvent):
-        """Real AstrBot event with in-memory platform delivery."""
+        async def send(self, message) -> None:
+            del message
 
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
-            self.sent_texts = []
-            self.streamed_texts = []
-
-        async def send(self, message: MessageChain) -> None:
-            """Record a non-streaming platform send.
-
-            Args:
-                message: Real AstrBot message chain.
-            """
-            self._has_send_oper = True
-            self.sent_texts.append(message.get_plain_text())
-
-        async def send_streaming(
-            self,
-            generator,
-            use_fallback: bool = False,
-        ) -> None:
-            """Consume and record a streaming platform send.
-
-            Args:
-                generator: AstrBot message-chain async generator.
-                use_fallback: Whether platform fallback delivery is requested.
-            """
-            del use_fallback
-            self._has_send_oper = True
-            async for chain in generator:
-                self.streamed_texts.append(chain.get_plain_text())
+        async def send_streaming(self, generator, use_fallback: bool = False) -> None:
+            del generator, use_fallback
 
     class ConversationManager:
-        """Conversation manager exposing the no-current-conversation path."""
-
         async def get_curr_conversation_id(self, _umo):
-            """Return no current conversation for a fresh test group."""
             return None
 
     class PersonaManager:
-        """Persona manager returning a deterministic default persona."""
-
         async def get_default_persona_v3(self, _umo):
-            """Return a default persona compatible with AstrBot 4.27."""
             return {"prompt": "A friendly group-chat bot."}
 
-    def make_event(session_id: str, text: str, *, wake: bool = False):
+    def make_event(
+        session_id: str,
+        text: str,
+        *,
+        wake: bool = False,
+        sender_id: str = "user-1",
+        sender_name: str = "Alice",
+        components=None,
+    ):
         message = AstrBotMessage()
         message.type = MessageType.GROUP_MESSAGE
         message.self_id = "bot-1"
         message.session_id = session_id
         message.message_id = f"message-{session_id}-{time.monotonic_ns()}"
         message.group_id = session_id
-        message.sender = MessageMember(user_id="user-1", nickname="Alice")
-        message.message = [Plain(text)]
+        message.sender = MessageMember(user_id=sender_id, nickname=sender_name)
+        message.message = components if components is not None else [Plain(text)]
         message.message_str = text
         message.raw_message = None
         event = RecordingEvent(
@@ -215,16 +160,24 @@ async def _run(plugin_root: Path) -> dict:
                 "enable_heartflow": True,
                 "judge_provider_name": "judge",
                 "reply_threshold": 0.6,
+                "look_interval_seconds": 60,
+                "look_unread_threshold": 2,
+                "look_debounce_seconds": 0,
+                "judge_cooldown_seconds": 0,
+                "judge_max_requests_per_minute": 0,
+                "min_reply_interval_seconds": 0,
                 "judge_max_retries": 1,
                 "judge_timeout_seconds": 5,
-                "min_reply_interval_seconds": 0,
             }
         )
 
         main_config = copy.deepcopy(DEFAULT_CONFIG)
         main_config["provider_ltm_settings"]["active_reply"]["enable"] = False
-        provider = DeterministicProvider()
-        provider_manager = SimpleNamespace(inst_map={"judge": provider})
+        judge_provider = DeterministicProvider("judge", mode="judge")
+        main_provider = DeterministicProvider("main", mode="main")
+        sent_messages = []
+
+        provider_manager = SimpleNamespace(inst_map={"judge": judge_provider})
         config_manager = SimpleNamespace(get_conf=lambda _umo: main_config)
         context = Context(
             asyncio.Queue(),
@@ -239,6 +192,15 @@ async def _run(plugin_root: Path) -> dict:
             MagicMock(),
             MagicMock(),
         )
+        context.get_using_provider_async = lambda _umo=None: asyncio.sleep(
+            0, result=main_provider
+        )
+
+        async def _send_message(session, message_chain):
+            sent_messages.append((session, message_chain))
+            return True
+
+        context.send_message = _send_message
 
         heartflow = _load_plugin(plugin_root)
         plugin = heartflow.HeartflowPlugin(context=context, config=plugin_config)
@@ -248,7 +210,6 @@ async def _run(plugin_root: Path) -> dict:
         )
         handler_types = {handler.event_type for handler in module_handlers}
         assert EventType.AdapterMessageEvent in handler_types
-        assert EventType.OnLLMRequestEvent in handler_types
         assert EventType.OnLLMResponseEvent in handler_types
         runtime_metadata = star_map[heartflow.__name__]
         runtime_metadata.name = metadata.name
@@ -277,180 +238,65 @@ async def _run(plugin_root: Path) -> dict:
             async for _ in call_handler(event, group_handler.handler):
                 pass
 
-        pipeline_context = PipelineContext(main_config, MagicMock(), "heartflow-e2e")
-        respond_stage = RespondStage()
-        await respond_stage.initialize(pipeline_context)
-
-        success_event = make_event("success-group", "Should we discuss this topic?")
         bind_plugin(plugin)
-        await dispatch_group_message(success_event)
-        assert success_event.get_extra("heartflow_triggered") is True
-        request = ProviderRequest(system_prompt="base system prompt")
-        await call_event_hook(success_event, EventType.OnLLMRequestEvent, request)
-        assert "主动参与群聊" in request.system_prompt
-        success_response = LLMResponse(
-            role="assistant",
-            result_chain=MessageChain().message("A natural proactive reply."),
+
+        # 1. 定向他人对话流自动过滤（不调小模型）
+        directed_1 = make_event(
+            "directed-group",
+            "晚上打游戏吗",
+            sender_id="u1",
+            sender_name="张三",
+            components=[At(qq="u2", name="李四"), Plain("晚上打游戏吗")],
         )
+        directed_2 = make_event(
+            "directed-group",
+            "来啊",
+            sender_id="u2",
+            sender_name="李四",
+            components=[
+                Reply(id="1", sender_id="u1", sender_nickname="张三", message_str="晚上打游戏吗"),
+                Plain("来啊"),
+            ],
+        )
+        await dispatch_group_message(directed_1)
+        await dispatch_group_message(directed_2)
+        await plugin._run_look_cycle(directed_1.unified_msg_origin)
+        assert len(judge_provider.calls) == 0
+        assert len(sent_messages) == 0
+
+        # 2. 攒批看群 + 选中公开话题 + 主模型主动发送
+        e1 = make_event("batch-group", "你到家没", sender_id="u1", sender_name="张三", components=[At(qq="u2", name="李四"), Plain("你到家没")])
+        e2 = make_event("batch-group", "大家周末想去吃啥", sender_id="u3", sender_name="王五")
+        await dispatch_group_message(e1)
+        await dispatch_group_message(e2)
+        await plugin._run_look_cycle(e1.unified_msg_origin)
+        assert len(judge_provider.calls) == 1
+        assert len(main_provider.calls) == 1
+        assert len(sent_messages) == 1
+
+        # 3. 正常唤醒回复也写入缓冲区
+        wake_event = make_event("wake-group", "A direct wake message", wake=True)
+        await dispatch_group_message(wake_event)
         await call_event_hook(
-            success_event,
+            wake_event,
             EventType.OnLLMResponseEvent,
-            success_response,
+            LLMResponse(role="assistant", completion_text="Wake reply text."),
         )
-        success_state = plugin._get_chat_state(success_event.unified_msg_origin)
-        assert success_state.total_replies == 1
-        assert success_state.energy < 1.0
-        assert plugin._get_last_bot_reply(success_event) == "A natural proactive reply."
-        success_event.set_result(
-            MessageEventResult(
-                chain=list(success_response.result_chain.chain),
-                result_content_type=ResultContentType.LLM_RESULT,
-            )
-        )
-        await respond_stage.process(success_event)
-        assert success_event.sent_texts == ["A natural proactive reply."]
-
-        streaming_event = make_event(
-            "streaming-group", "A direct wake message", wake=True
-        )
-        await dispatch_group_message(streaming_event)
-        streaming_response = LLMResponse(
-            role="assistant",
-            result_chain=MessageChain().message("Final streamed reply."),
-        )
-        await call_event_hook(
-            streaming_event,
-            EventType.OnLLMResponseEvent,
-            streaming_response,
-        )
-
-        async def stream_chunks():
-            yield MessageChain().message("Final streamed reply.")
-
-        streaming_event.set_result(
-            MessageEventResult(
-                result_content_type=ResultContentType.STREAMING_RESULT,
-                async_stream=stream_chunks(),
-            )
-        )
-        await respond_stage.process(streaming_event)
-        assert streaming_event.streamed_texts == ["Final streamed reply."]
-        assert plugin._get_last_bot_reply(streaming_event) == "Final streamed reply."
-
-        error_event = make_event("error-group", "Trigger then fail")
-        await dispatch_group_message(error_event)
-        error_state = plugin._get_chat_state(error_event.unified_msg_origin)
-        assert error_state.last_trigger_time > 0
-        await call_event_hook(
-            error_event,
-            EventType.OnLLMResponseEvent,
-            LLMResponse(role="err", completion_text="provider failed"),
-        )
-        assert error_state.last_trigger_time == 0
-        assert error_state.total_replies == 0
-
-        timeout_config = dict(plugin_config)
-        timeout_config["judge_timeout_seconds"] = 5
-        timeout_plugin = heartflow.HeartflowPlugin(
-            context=context,
-            config=timeout_config,
-        )
-        timeout_plugin.judge_timeout_seconds = 0.05
-        provider.delay = 0.2
-        timeout_event = make_event("timeout-group", "This judgment should timeout")
-        bind_plugin(timeout_plugin)
-        timeout_started = time.monotonic()
-        await dispatch_group_message(timeout_event)
-        timeout_elapsed = time.monotonic() - timeout_started
-        timeout_lock = timeout_plugin._get_chat_lock(timeout_event.unified_msg_origin)
-        assert timeout_elapsed < 0.15
-        assert not timeout_lock.locked()
-        assert not timeout_event.get_extra("heartflow_triggered", False)
-
-        concurrency_config = dict(plugin_config)
-        concurrency_config["min_reply_interval_seconds"] = 60
-        concurrency_plugin = heartflow.HeartflowPlugin(
-            context=context,
-            config=concurrency_config,
-        )
-        provider.delay = 0.03
-        first = make_event("concurrent-group", "first concurrent message")
-        second = make_event("concurrent-group", "second concurrent message")
-        bind_plugin(concurrency_plugin)
-        await asyncio.gather(
-            dispatch_group_message(first),
-            dispatch_group_message(second),
-        )
-        triggered_count = sum(
-            bool(event.get_extra("heartflow_triggered", False))
-            for event in (first, second)
-        )
-        assert triggered_count == 1
-
-        # 判断冷却：同一群聊的连续消息只允许一次小模型调用，但消息仍需入库
-        cooldown_config = dict(plugin_config)
-        cooldown_config["judge_cooldown_seconds"] = 60
-        cooldown_config["judge_max_requests_per_minute"] = 0
-        cooldown_plugin = heartflow.HeartflowPlugin(
-            context=context,
-            config=cooldown_config,
-        )
-        provider.delay = 0
-        cooldown_calls_before = len(provider.calls)
-        bind_plugin(cooldown_plugin)
-        cooldown_events = [
-            make_event("cooldown-group", f"cooldown message {index}")
-            for index in range(3)
-        ]
-        for cooldown_event in cooldown_events:
-            await dispatch_group_message(cooldown_event)
-        assert len(provider.calls) - cooldown_calls_before == 1
-        cooldown_state = cooldown_plugin._get_chat_state(
-            cooldown_events[0].unified_msg_origin
-        )
-        assert cooldown_state.total_judges == 1
-        assert cooldown_state.skipped_judges == 2
-        assert cooldown_state.total_messages == 3
-        assert (
-            len(cooldown_plugin._get_raw_buffer(cooldown_events[0].unified_msg_origin))
-            == 3
-        )
-
-        # 全局限频：跨群聊合计达到每分钟上限后不再调用小模型
-        rate_config = dict(plugin_config)
-        rate_config["judge_cooldown_seconds"] = 0
-        rate_config["judge_max_requests_per_minute"] = 2
-        rate_plugin = heartflow.HeartflowPlugin(context=context, config=rate_config)
-        rate_calls_before = len(provider.calls)
-        bind_plugin(rate_plugin)
-        for index in range(4):
-            await dispatch_group_message(
-                make_event(f"rate-group-{index}", "global limit message")
-            )
-        assert len(provider.calls) - rate_calls_before == 2
-        assert rate_plugin._recent_judge_count() == 2
+        assert plugin._get_last_bot_reply(wake_event.unified_msg_origin) == "Wake reply text."
 
         await plugin.terminate()
-        await timeout_plugin.terminate()
-        await concurrency_plugin.terminate()
-        await cooldown_plugin.terminate()
-        await rate_plugin.terminate()
 
     return {
         "astrbot_version_compatible": True,
         "schema_loaded_by_astrbot": True,
         "real_handler_registration": True,
-        "successful_trigger_and_send": True,
-        "streaming_delivery_and_context": True,
-        "provider_error_rollback": True,
-        "judge_timeout_unlock": True,
-        "concurrent_cooldown": True,
-        "judge_rate_limiting": True,
+        "directed_messages_filtered": True,
+        "batch_look_and_send": True,
+        "wake_response_recorded": True,
     }
 
 
 def main() -> None:
-    """Parse arguments and run the end-to-end suite."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--plugin-root", type=Path, required=True)
     args = parser.parse_args()

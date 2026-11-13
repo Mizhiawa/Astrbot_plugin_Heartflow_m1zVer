@@ -3,20 +3,64 @@
     "description": "启用心流主动回复",
     "type": "bool",
     "default": false,
-    "hint": "启用后，机器人将智能判断群聊消息并主动回复"
+    "hint": "启用后，机器人将定期/攒够未读后像真人一样看群并智能决定是否主动参与话题"
   },
   "judge_provider_name": {
     "description": "判断模型提供商",
     "type": "string",
     "default": "",
-    "hint": "用于小参数模型判断的提供商，建议使用响应较快、成本较低的模型",
+    "hint": "用于小参数模型看群评估的提供商，建议使用响应较快、成本较低的模型",
     "_special": "select_provider"
+  },
+  "look_interval_seconds": {
+    "description": "定时看群间隔（秒）",
+    "type": "int",
+    "default": 900,
+    "hint": "有未读消息时，距离上次看群超过该秒数后触发一次批量评估（推荐 600~1800 秒，即 10~30 分钟，省 Token 且拟人）",
+    "slider": {
+      "min": 60,
+      "max": 3600,
+      "step": 60
+    }
+  },
+  "look_unread_threshold": {
+    "description": "攒够未读条数提前看群",
+    "type": "int",
+    "default": 20,
+    "hint": "当新到达的群消息累计未读达到该条数时，不等定时到期直接看群评估；设为 0 表示仅按定时看群",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 5
+    }
+  },
+  "look_debounce_seconds": {
+    "description": "看群防抖静默时间（秒）",
+    "type": "int",
+    "default": 5,
+    "hint": "有新消息到达后至少静默等待几秒再评估，避免群友一句拆成多条发到一半就插嘴（0 表示不等待）",
+    "slider": {
+      "min": 0,
+      "max": 30,
+      "step": 1
+    }
+  },
+  "look_max_unread_messages": {
+    "description": "单次最多读取未读条数",
+    "type": "int",
+    "default": 40,
+    "hint": "单次批量评估最多读取多少条未读消息，超出时保留最新的若干条",
+    "slider": {
+      "min": 5,
+      "max": 100,
+      "step": 5
+    }
   },
   "reply_threshold": {
     "description": "回复阈值(0-1)",
     "type": "float",
-    "default": 0.6,
-    "hint": "超过此阈值才会主动回复，值越高越严格",
+    "default": 0.62,
+    "hint": "综合评分超过此阈值才会主动回复，值越高越严格",
     "slider": {
       "min": 0,
       "max": 1,
@@ -27,7 +71,7 @@
     "description": "精力衰减速度",
     "type": "float",
     "default": 0.1,
-    "hint": "每次回复后精力下降的幅度，影响后续回复的积极性",
+    "hint": "每次主动回复后精力下降的幅度，影响后续回复的积极性",
     "slider": {
       "min": 0,
       "max": 1,
@@ -37,8 +81,8 @@
   "energy_recovery_rate": {
     "description": "精力恢复速度",
     "type": "float",
-    "default": 0.02,
-    "hint": "每次不回复时，以及每经过5分钟时恢复的精力幅度",
+    "default": 0.03,
+    "hint": "每次看群未回复时，以及每经过5分钟时恢复的精力幅度",
     "slider": {
       "min": 0,
       "max": 1,
@@ -48,13 +92,80 @@
   "context_messages_count": {
     "description": "本地上下文缓冲基数",
     "type": "int",
-    "default": 5,
-    "hint": "用于追踪上次回复和群聊活跃度的本地缓冲基数，实际缓冲区会保留更多消息",
+    "default": 10,
+    "hint": "用于追踪群聊上下文的本地缓冲基数，实际缓冲区会保留更多消息",
     "slider": {
       "min": 1,
       "max": 100,
       "step": 1
     }
+  },
+  "judge_context_count": {
+    "description": "看群前附带的已读历史条数",
+    "type": "int",
+    "default": 10,
+    "hint": "在本次未读消息之前附带多少条已读群聊历史给模型作背景",
+    "slider": {
+      "min": 1,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "min_reply_interval_seconds": {
+    "description": "最短主动回复间隔（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "两次心流主动回复之间的最短间隔秒数（0 表示不限制）",
+    "slider": {
+      "min": 0,
+      "max": 86400,
+      "step": 60
+    }
+  },
+  "judge_cooldown_seconds": {
+    "description": "看群判断最小冷却（秒/群）",
+    "type": "int",
+    "default": 60,
+    "hint": "同一群聊两次调用小模型看群之间的最短间隔秒数，防止高活跃群频繁触发定量看群（0 表示不限制）",
+    "slider": {
+      "min": 0,
+      "max": 3600,
+      "step": 10
+    }
+  },
+  "judge_max_requests_per_minute": {
+    "description": "判断全局上限（次/分钟）",
+    "type": "int",
+    "default": 20,
+    "hint": "所有群聊合计每分钟最多调用小模型的次数，防止多群同时触发突破提供商RPM限制（0 表示不限制）",
+    "slider": {
+      "min": 0,
+      "max": 600,
+      "step": 5
+    }
+  },
+  "self_share_limit": {
+    "description": "近期发言占比上限(0-1)",
+    "type": "float",
+    "default": 0.25,
+    "hint": "近15分钟内机器人发言轮次占群聊消息比例达到该值时暂停主动插嘴，避免刷屏（0 或 1 表示不限制）",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    }
+  },
+  "filter_directed_messages": {
+    "description": "过滤明显对他人的定向发言",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，自动识别 @他人、引用回复他人、以及群友短时间一对一接龙对话；全为定向对话时跳过看群，且禁止选为回复焦点"
+  },
+  "allow_quote_reply": {
+    "description": "允许引用特定历史消息",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，当想回复的话题已被后续无关消息刷过去几条时，允许引用对应的目标消息发送回复"
   },
   "whitelist_enabled": {
     "description": "启用群聊白名单",
@@ -69,10 +180,10 @@
     "hint": "允许心流回复的群聊sid列表，/sid获取"
   },
   "judge_relevance": {
-    "description": "判断权重的内容相关度",
+    "description": "判断权重的内容价值度",
     "type": "float",
-    "default": 0.25,
-    "hint": "针对判断权重的内容相关度设置，默认25%",
+    "default": 0.3,
+    "hint": "未读消息里是否有有趣、有价值且符合角色设定的话题（默认30%）",
     "slider": {
       "min": 0,
       "max": 1,
@@ -82,8 +193,8 @@
   "judge_willingness": {
     "description": "判断权重的回复意愿",
     "type": "float",
-    "default": 0.2,
-    "hint": "针对判断权重的回复意愿设置，默认20%",
+    "default": 0.25,
+    "hint": "结合精力和人设，机器人是否真正有话想说（默认25%）",
     "slider": {
       "min": 0,
       "max": 1,
@@ -94,7 +205,7 @@
     "description": "判断权重的社交适宜性",
     "type": "float",
     "default": 0.2,
-    "hint": "针对判断权重的社交适宜性设置，默认20%",
+    "hint": "是否适合此刻插话，而非打断他人一对一对话或尴尬插嘴（默认20%）",
     "slider": {
       "min": 0,
       "max": 1,
@@ -102,10 +213,10 @@
     }
   },
   "judge_timing": {
-    "description": "判断权重的时机相关性",
+    "description": "判断权重的时机与活跃状态",
     "type": "float",
     "default": 0.15,
-    "hint": "针对判断权重的时机相关性设置，默认15%",
+    "hint": "结合话题是否还未聊过去以及上次发言间隔，时机是否恰当（默认15%）",
     "slider": {
       "min": 0,
       "max": 1,
@@ -115,8 +226,8 @@
   "judge_continuity": {
     "description": "判断权重的对话连贯性",
     "type": "float",
-    "default": 0.2,
-    "hint": "针对判断权重的对话连贯性设置，默认20%",
+    "default": 0.1,
+    "hint": "话题的开放度、未完结程度或与上次互动的衔接感（默认10%）",
     "slider": {
       "min": 0,
       "max": 1,
@@ -144,54 +255,21 @@
     "description": "判断模型超时（秒）",
     "type": "float",
     "default": 30,
-    "hint": "整轮判断（包含格式重试）或单次人格总结的最长等待时间，超时后本条消息不会触发回复",
+    "hint": "整轮看群判断（包含格式重试）或单次人格总结的最长等待时间",
     "slider": {
       "min": 5,
       "max": 120,
       "step": 5
     }
   },
-  "judge_context_count": {
-    "description": "传入判断模型的上下文条数",
-    "type": "int",
-    "default": 10,
-    "hint": "实际传给判断模型的最近对话条数，建议5-20条",
+  "reply_timeout_seconds": {
+    "description": "主模型生成回复超时（秒）",
+    "type": "float",
+    "default": 45,
+    "hint": "判断通过后调用主大模型生成群聊回复的最长等待时间",
     "slider": {
-      "min": 1,
-      "max": 100,
-      "step": 1
-    }
-  },
-  "min_reply_interval_seconds": {
-    "description": "最短回复间隔（秒）",
-    "type": "int",
-    "default": 0,
-    "hint": "两次心流主动触发之间的最短间隔秒数，0表示不限制，可防止机器人过于频繁发言",
-    "slider": {
-      "min": 0,
-      "max": 86400,
-      "step": 30
-    }
-  },
-  "judge_cooldown_seconds": {
-    "description": "判断冷却（秒/群）",
-    "type": "int",
-    "default": 15,
-    "hint": "同一群聊两次调用小模型判断之间的最短间隔秒数。冷却期内的消息仍会记录到上下文，但不调用小模型，可有效避免每条消息都请求导致RPM超限。0表示不限制",
-    "slider": {
-      "min": 0,
-      "max": 3600,
-      "step": 5
-    }
-  },
-  "judge_max_requests_per_minute": {
-    "description": "判断全局上限（次/分钟）",
-    "type": "int",
-    "default": 30,
-    "hint": "所有群聊合计每分钟最多调用小模型的次数，用于防止多群同时活跃时突破提供商RPM限制。0表示不限制",
-    "slider": {
-      "min": 0,
-      "max": 600,
+      "min": 10,
+      "max": 120,
       "step": 5
     }
   },
@@ -199,7 +277,7 @@
     "description": "最大群聊状态数量",
     "type": "int",
     "default": 1000,
-    "hint": "限制内存中保留的群聊状态和消息缓冲数量，超出后淘汰最久未使用且未在处理中的群聊",
+    "hint": "限制内存中保留的群聊状态和消息缓冲数量，超出后淘汰最久未使用的群聊",
     "slider": {
       "min": 1,
       "max": 10000,
